@@ -1,56 +1,56 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <semaphore.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+#include <sys/shm.h>
+#include <time.h> 
 
-#define QUEUE_SIZE 10
+#define MAX_QUEUE_SIZE 10
 
-typedef struct {
-    int items[QUEUE_SIZE];
+struct shared_memory {
+    int buffer[MAX_QUEUE_SIZE];
     int front, rear, count;
-    sem_t *empty;
-    sem_t *full;
-    sem_t *mutex;
-} CircularQueue;
-
-void initQueue(CircularQueue *q) {
-    q->front = 0;
-    q->rear = -1;
-    q->count = 0;
-    q->empty = sem_open("/empty_sem", O_CREAT, 0666, QUEUE_SIZE);
-    q->full = sem_open("/full_sem", O_CREAT, 0666, 0);
-    q->mutex = sem_open("/mutex_sem", O_CREAT, 0666, 1);
-}
-
-void produceItem(CircularQueue *q, int item) {
-    sem_wait(q->empty);
-    sem_wait(q->mutex);
-    q->rear = (q->rear + 1) % QUEUE_SIZE;
-    q->items[q->rear] = item;
-    q->count++;
-    printf("Produced: %d\n", item);
-    sem_post(q->mutex);
-    sem_post(q->full);
-}
+};
 
 int main() {
-    int item;
-    CircularQueue *queue;
-    int fd = shm_open("/myqueue", O_CREAT | O_RDWR, 0666);
-    ftruncate(fd, sizeof(CircularQueue));
-    queue = (CircularQueue *)mmap(NULL, sizeof(CircularQueue), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    key_t key = ftok("producer.c", 'R');
+    int shmid = shmget(key, sizeof(struct shared_memory), 0666|IPC_CREAT);
+    struct shared_memory *shmem = (struct shared_memory*) shmat(shmid, NULL, 0);
 
-    initQueue(queue);
+    // Semaphore initialization
+    int semid = semget(key, 2, IPC_CREAT | 0666);
+    semctl(semid, 0, SETVAL, 1); // Mutex for shared memory
+    semctl(semid, 1, SETVAL, 0); // Items in the queue
+
+    // Initialize random number generator
+    srand(time(NULL));
+
+    // Add some initial items to the queue
+    for (int i = 0; i < 5; i++) {
+        int item = rand() % 100; // Generates a random number between 0 and 99
+        shmem->buffer[shmem->rear] = item;
+        shmem->rear = (shmem->rear + 1) % MAX_QUEUE_SIZE;
+        shmem->count++;
+    }
 
     while (1) {
-        printf("Enter an integer: ");
-        scanf("%d", &item);
-        produceItem(queue, item);
-        sleep(1); // Simulating some delay
+        semop(semid, &(struct sembuf){.sem_num=0, .sem_op=-1}, 1); // Lock the shared memory
+        semop(semid, &(struct sembuf){.sem_num=1, .sem_op=-1}, 1); // Wait for an empty slot in the queue
+
+        // Generate a random number
+        int item = rand() % 100; // Generates a random number between 0 and 99
+
+        shmem->buffer[shmem->rear] = item;
+        shmem->rear = (shmem->rear + 1) % MAX_QUEUE_SIZE;
+        shmem->count++;
+
+        semop(semid, &(struct sembuf){.sem_num=0, .sem_op=1}, 1); // Unlock the shared memory
     }
+
+    shmdt(shmem);
+    shmctl(shmid, IPC_RMID, NULL);
 
     return 0;
 }
-
